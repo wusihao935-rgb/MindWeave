@@ -238,7 +238,7 @@ export class CloudRepository {
   }
 
   private async replaceRows(table: string, userId: string, activeIds: string[], rows: Array<Record<string, unknown>>) {
-    const uniqueRows = uniqueRowsById(rows);
+    const uniqueRows = uniqueRowsById(rows).map((row) => sanitizeForPostgres(row) as Record<string, unknown>);
     if (uniqueRows.length) {
       const { error } = await this.supabase.from(table).upsert(uniqueRows, { onConflict: "user_id,id" });
       if (error) throw new Error(`${table} 写入失败：${error.message}`);
@@ -304,6 +304,21 @@ function uniqueRowsById(rows: Array<Record<string, unknown>>) {
     map.set(id, row);
   }
   return Array.from(map.values());
+}
+
+function sanitizeForPostgres(value: unknown): unknown {
+  if (typeof value === "string") return sanitizePostgresString(value);
+  if (Array.isArray(value)) return value.map((item) => sanitizeForPostgres(item));
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, sanitizeForPostgres(item)]));
+  }
+  return value;
+}
+
+function sanitizePostgresString(value: string) {
+  return value
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "")
+    .replace(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g, "");
 }
 
 function toSource(row: any, summaryRow?: any): Source {
