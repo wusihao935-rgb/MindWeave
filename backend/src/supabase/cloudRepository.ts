@@ -1,4 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { rebuildGraph } from "../graph/knowledgeGraph.js";
 import type {
   ApiProviderName,
   ApiProviderSetting,
@@ -52,7 +53,7 @@ export class CloudRepository {
     const reviewCards = summaries.flatMap((row) => ((row.review_cards as ReviewCard[] | null) ?? []));
     const userMemory = toUserMemory(stopwords);
 
-    return {
+    const db = {
       sources,
       chunks: chunks.map(toChunk),
       knowledgeCards,
@@ -65,6 +66,8 @@ export class CloudRepository {
       editLog: events.map(toEditLog),
       updatedAt: latestUpdatedAt([documents, chunks, summaries, nodes, edges, projects, tags, stopwords])
     };
+
+    return repairMissingGraphCoverage(db);
   }
 
   async persistState(userId: string, db: MindWeaveDB, options: PersistOptions = {}) {
@@ -304,6 +307,26 @@ function uniqueRowsById(rows: Array<Record<string, unknown>>) {
     map.set(id, row);
   }
   return Array.from(map.values());
+}
+
+function repairMissingGraphCoverage(db: MindWeaveDB): MindWeaveDB {
+  const activeNodeIds = new Set(db.nodes.filter((node) => node.status !== "ignored").map((node) => node.id));
+  const hasMissingSourceGraph = db.sources.some((source) => !activeNodeIds.has(`source:${source.id}`));
+  if (!hasMissingSourceGraph) return db;
+
+  const graph = rebuildGraph(db.sources, {
+    chunks: db.chunks,
+    userMemory: db.userMemory,
+    previousNodes: db.nodes,
+    previousEdges: db.edges
+  });
+
+  return {
+    ...db,
+    nodes: graph.nodes,
+    edges: graph.edges,
+    updatedAt: new Date().toISOString()
+  };
 }
 
 function sanitizeForPostgres(value: unknown): unknown {

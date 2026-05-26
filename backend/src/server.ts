@@ -51,8 +51,14 @@ app.get("/api/state", async (req, res) => {
 
 app.post("/api/sync", async (req, res) => {
   try {
-    const { db } = await getRequestState(req as unknown as AuthenticatedRequest);
-    res.json({ ...toDashboardState(db), sync: { status: "synced", strategy: "last-write-wins" } });
+    const authReq = req as unknown as AuthenticatedRequest;
+    const { store } = await getRequestState(authReq);
+    await persistRequestState(authReq, store, {
+      eventAction: "sync_state",
+      eventTargetId: "workspace",
+      eventDetail: "手动同步并修复云端图谱覆盖。"
+    });
+    res.json({ ...toDashboardState(store.getState()), sync: { status: "synced", strategy: "last-write-wins" } });
   } catch (error) {
     res.status(500).json({ error: errorMessage(error, "同步失败。") });
   }
