@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="MindWeave">
+  <rect width="512" height="512" rx="96" fill="#080b12"/>
+  <circle cx="160" cy="170" r="48" fill="#4f83ff"/>
+  <circle cx="342" cy="152" r="42" fill="#35c2a2"/>
+  <circle cx="270" cy="334" r="58" fill="#8d7aff"/>
+  <path d="M196 184l108-26M178 210l74 92M323 184l-38 108" stroke="#eaf0ff" stroke-width="28" stroke-linecap="round"/>
+  <circle cx="160" cy="170" r="23" fill="#eaf0ff"/>
+  <circle cx="342" cy="152" r="20" fill="#eaf0ff"/>
+  <circle cx="270" cy="334" r="26" fill="#eaf0ff"/>
+</svg>

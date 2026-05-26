@@ -1,0 +1,20 @@
+{
+  "name": "MindWeave Cloud",
+  "short_name": "MindWeave",
+  "description": "跨平台个人知识图谱与资料库",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "display_override": ["window-controls-overlay", "standalone", "browser"],
+  "background_color": "#080b12",
+  "theme_color": "#4f83ff",
+  "orientation": "any",
+  "icons": [
+    {
+      "src": "/pwa-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

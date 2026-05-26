@@ -1,0 +1,15 @@
+node_modules/
+dist/
+backend/dist/
+backend/database/*.json
+*.log
+.env
+.env.*
+!.env.example
+.DS_Store
+.vercel/
+.netlify/
+coverage/
+*.tsbuildinfo
+/MindWeave_AI_personal_knowledge_graph_product_brief.docx
+/mindweave_concept.png
