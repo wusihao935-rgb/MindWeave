@@ -25,14 +25,18 @@ export async function parseSourceInput(input: ParseInput): Promise<ParsedSource>
 
 async function parseFile(file: Express.Multer.File, explicitTitle?: string): Promise<ParsedSource> {
   const originalName = file.originalname || "uploaded-source";
-  const extension = originalName.split(".").pop()?.toLowerCase();
-  const type = detectSourceType(extension);
+  const type = detectSourceType(file);
   let content = "";
 
   if (type === "pdf") {
-    const pdfParse = (await import("pdf-parse")).default;
-    const result = await pdfParse(file.buffer);
-    content = result.text;
+    try {
+      const pdfParse = (await import("pdf-parse")).default;
+      const result = await pdfParse(file.buffer);
+      content = result.text;
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "未知错误";
+      throw new Error(`PDF 文本提取失败：${detail}`);
+    }
   } else {
     content = file.buffer.toString("utf-8");
   }
@@ -77,9 +81,13 @@ async function parseUrl(url: string): Promise<ParsedSource> {
   };
 }
 
-function detectSourceType(extension?: string): SourceType {
-  if (extension === "pdf") return "pdf";
-  if (extension === "md" || extension === "markdown") return "markdown";
-  if (extension === "txt") return "txt";
+function detectSourceType(file: Express.Multer.File): SourceType {
+  const originalName = file.originalname || "";
+  const extension = originalName.split(".").pop()?.toLowerCase();
+  const mimeType = file.mimetype?.toLowerCase() || "";
+  const header = file.buffer.subarray(0, 5).toString("utf-8");
+  if (extension === "pdf" || mimeType === "application/pdf" || header === "%PDF-") return "pdf";
+  if (extension === "md" || extension === "markdown" || mimeType.includes("markdown")) return "markdown";
+  if (extension === "txt" || mimeType.startsWith("text/")) return "txt";
   return "unknown";
 }

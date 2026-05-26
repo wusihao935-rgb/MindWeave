@@ -15,11 +15,20 @@ async function request<T>(url: string, options: RequestInit = {}): Promise<T> {
   const headers = new Headers(options.headers);
   if (token) headers.set("Authorization", `Bearer ${token}`);
   const response = await fetch(`${API_BASE}${url}`, { ...options, headers });
-  const payload = await response.json().catch(() => ({}));
+  const payload = await readResponsePayload(response);
   if (!response.ok) {
-    throw new Error(payload.error || "请求失败");
+    throw new Error(payload.error || payload.message || `请求失败（${response.status}）`);
   }
   return payload as T;
+}
+
+async function readResponsePayload(response: Response): Promise<Record<string, string>> {
+  const contentType = response.headers.get("content-type") || "";
+  if (contentType.includes("application/json")) {
+    return response.json().catch(() => ({}));
+  }
+  const text = await response.text().catch(() => "");
+  return text ? { message: text.slice(0, 180) } : {};
 }
 
 export function fetchState() {

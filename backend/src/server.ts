@@ -78,17 +78,15 @@ app.post("/api/sources", upload.single("file"), async (req, res) => {
   try {
     const authReq = req as unknown as AuthenticatedRequest;
     const { store, db } = await getRequestState(authReq);
-    let storagePath: string | undefined;
-    if (cloud && req.file) {
-      storagePath = await cloud.uploadSourceFile(authReq.auth.userId, req.file);
-    }
     const parsed = await parseSourceInput({
       file: req.file,
       url: req.body.url,
       rawText: req.body.rawText,
       title: req.body.title
     });
-    parsed.storagePath = storagePath;
+    if (cloud && req.file) {
+      parsed.storagePath = await cloud.uploadSourceFile(authReq.auth.userId, req.file);
+    }
     const projectId = req.body.projectId || db.projects[0]?.id || "project_ai_research";
     const source = store.addParsedSource(parsed, projectId);
     await persistRequestState(authReq, store, {
@@ -98,6 +96,7 @@ app.post("/api/sources", upload.single("file"), async (req, res) => {
     });
     res.status(201).json({ source });
   } catch (error) {
+    console.error("Source import failed:", errorMessage(error, "导入失败。"));
     res.status(400).json({ error: errorMessage(error, "导入失败。") });
   }
 });
@@ -316,6 +315,16 @@ app.post("/api/settings/ai-providers/test", async (req, res) => {
   } catch (error) {
     res.status(400).json({ ok: false, error: errorMessage(error, "测试连接失败。") });
   }
+});
+
+app.use((error: unknown, _req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if (error instanceof multer.MulterError) {
+    const message = error.code === "LIMIT_FILE_SIZE" ? "文件过大，单个文件请控制在 25MB 以内。" : `文件上传失败：${error.message}`;
+    console.error("Upload middleware failed:", message);
+    res.status(413).json({ error: message });
+    return;
+  }
+  next(error);
 });
 
 const frontendDist = path.join(process.cwd(), "dist", "frontend");

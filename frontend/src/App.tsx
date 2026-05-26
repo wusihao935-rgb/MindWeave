@@ -124,9 +124,14 @@ export default function App() {
     }
     setSyncStatus("syncing");
     setNotice("正在解析资料...");
-    await uploadSource(formData);
-    await load();
-    setNotice("资料已导入，并生成摘要、概念和图谱关系");
+    try {
+      await uploadSource(formData);
+      await load();
+      setNotice("资料已导入，并生成摘要、概念和图谱关系");
+    } catch (error) {
+      setSyncStatus("failed");
+      setNotice(error instanceof Error ? error.message : "资料导入失败，请稍后重试。");
+    }
   }
 
   async function handleSearch(query: string) {
