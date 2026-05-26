@@ -1699,6 +1699,7 @@ button {
   }
 
   .mobile-capture .upload-panel {
+    display: grid;
     border-color: #dbe3ef;
     box-shadow: 0 8px 24px rgba(35, 48, 74, 0.06);
   }
