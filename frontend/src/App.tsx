@@ -135,27 +135,47 @@ export default function App() {
   }
 
   async function handleSearch(query: string) {
-    setNotice(`正在搜索：${query}`);
-    const payload = await searchKnowledge(query);
-    setSearchResults(payload.results);
-    setView("graph");
-    if (payload.results[0]) {
-      setSelectedNodeId(`source:${payload.results[0].sourceId}`);
+    try {
+      setNotice(`正在搜索：${query}`);
+      const payload = await searchKnowledge(query);
+      setSearchResults(payload.results);
+      setView("graph");
+      if (payload.results[0]) {
+        setSelectedNodeId(`source:${payload.results[0].sourceId}`);
+      }
+      setNotice(`找到 ${payload.results.length} 条相关片段`);
+    } catch (error) {
+      setSearchResults([]);
+      setNotice(error instanceof Error ? error.message : "搜索失败，请稍后重试。");
     }
-    setNotice(`找到 ${payload.results.length} 条相关片段`);
   }
 
   async function handleAsk(question: string) {
     if (!navigator.onLine) {
       setSyncStatus("offline");
-      setNotice("离线时 AI 问答不可用，请恢复网络后重试。");
+      const message = "离线时 AI 问答不可用，请恢复网络后重试。";
+      setAnswer({ answer: message, citations: [], relatedConcepts: [], provider: "offline", fallback: true });
+      setNotice(message);
       return;
     }
     setNotice("正在基于资料库生成回答...");
-    const payload = await askKnowledge(question);
-    setAnswer(payload);
-    if (payload.citations[0]) setSelectedNodeId(`source:${payload.citations[0].sourceId}`);
-    setNotice(payload.fallback ? "回答已生成：外部模型不可用或未配置，已使用本地规则 fallback" : `回答已由 ${payload.provider} 生成`);
+    setAnswer(null);
+    try {
+      const payload = await askKnowledge(question);
+      setAnswer(payload);
+      if (payload.citations[0]) setSelectedNodeId(`source:${payload.citations[0].sourceId}`);
+      setNotice(payload.fallback ? "回答已生成：外部模型不可用或未配置，已使用本地规则 fallback" : `回答已由 ${payload.provider} 生成`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "资料库问答失败，请稍后重试。";
+      setAnswer({
+        answer: message,
+        citations: [],
+        relatedConcepts: [],
+        provider: "error",
+        fallback: true
+      });
+      setNotice(message);
+    }
   }
 
   async function handleCreateProject(name: string) {

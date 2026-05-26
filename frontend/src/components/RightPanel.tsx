@@ -50,6 +50,8 @@ export function RightPanel({
   const [newNodeName, setNewNodeName] = useState("");
   const [newEdgeTarget, setNewEdgeTarget] = useState("");
   const [newEdgeType, setNewEdgeType] = useState("关联");
+  const [askBusy, setAskBusy] = useState(false);
+  const [askError, setAskError] = useState("");
 
   useEffect(() => {
     setEditName(selectedNode?.name ?? "");
@@ -246,15 +248,22 @@ export function RightPanel({
         <form
           onSubmit={(event) => {
             event.preventDefault();
-            if (question.trim()) void onAsk(question.trim());
+            const trimmed = question.trim();
+            if (!trimmed || askBusy) return;
+            setAskBusy(true);
+            setAskError("");
+            void onAsk(trimmed)
+              .catch((error) => setAskError(error instanceof Error ? error.message : "资料库问答失败，请稍后重试。"))
+              .finally(() => setAskBusy(false));
           }}
         >
           <textarea value={question} onChange={(event) => setQuestion(event.target.value)} />
-          <button type="submit">
+          <button type="submit" disabled={askBusy || !question.trim()}>
             <Send size={15} />
-            <span>基于来源回答</span>
+            <span>{askBusy ? "生成中..." : "基于来源回答"}</span>
           </button>
         </form>
+        {askError && <p className="muted">{askError}</p>}
         {answer && (
           <div className="answer-box">
             <div className="answer-title">
@@ -262,6 +271,12 @@ export function RightPanel({
               <span>回答</span>
             </div>
             <p>{answer.answer}</p>
+            {answer.timings && (
+              <small className="answer-meta">
+                后端耗时 {Math.round((answer.timings.durationMs ?? 0) / 100) / 10}s · 片段 {answer.timings.retrievedChunks ?? 0}
+                {answer.timings.build ? ` · ${answer.timings.build}` : ""}
+              </small>
+            )}
             <div className="citation-list">
               {answer.citations.map((citation) => (
                 <button key={citation.chunkId} type="button" onClick={() => onSelectSource(citation.sourceId)}>

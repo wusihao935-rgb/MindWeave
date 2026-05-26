@@ -151,6 +151,12 @@ export interface AnswerResponse {
   relatedConcepts: string[];
   provider?: string;
   fallback?: boolean;
+  timings?: {
+    durationMs?: number;
+    retrievedChunks?: number;
+    retrievedSources?: number;
+    build?: string;
+  };
 }
 
 export type SyncStatus = "synced" | "syncing" | "failed" | "offline";

@@ -8,10 +8,11 @@ export function embedText(text: string): Record<string, number> {
 export function searchChunks(db: MindWeaveDB, query: string, limit = 8): SearchResult[] {
   const queryVector = embedText(query);
   const queryKeywords = extractKeywords(query, 8).map((item) => item.toLowerCase());
+  const sourcesById = new Map(db.sources.map((source) => [source.id, source]));
 
   return db.chunks
     .map((chunk) => {
-      const source = db.sources.find((item) => item.id === chunk.sourceId);
+      const source = sourcesById.get(chunk.sourceId);
       if (!source) return null;
       const chunkVector = chunk.embedding && Object.keys(chunk.embedding).length ? chunk.embedding : embedText(chunk.text);
       const baseScore = cosineSimilarity(queryVector, chunkVector);

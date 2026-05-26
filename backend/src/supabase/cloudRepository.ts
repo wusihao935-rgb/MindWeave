@@ -16,10 +16,15 @@ import type {
   UserMemory
 } from "../types.js";
 import { createEmptyDatabase } from "../database/seed.js";
-import { createId, slugify } from "../utils/text.js";
+import { createId, slugify, tokenize } from "../utils/text.js";
 import { decryptSecret, encryptSecret } from "../security/crypto.js";
 
 const BUCKET = process.env.SUPABASE_STORAGE_BUCKET || "mindweave-documents";
+const RETRIEVAL_MATCH_LIMIT = 160;
+const RETRIEVAL_TERM_LIMIT = 6;
+const RETRIEVAL_PER_TERM_LIMIT = 50;
+const RETRIEVAL_FALLBACK_LIMIT = 160;
+const RETRIEVAL_CHUNK_FIELDS = "id,document_id,text,chunk_index,page,timestamp_label,created_at,updated_at,version";
 
 interface PersistOptions {
   eventAction?: string;
@@ -68,6 +73,26 @@ export class CloudRepository {
     };
 
     return repairMissingGraphCoverage(db);
+  }
+
+  async loadRetrievalState(userId: string, query?: string, signal?: AbortSignal): Promise<MindWeaveDB> {
+    const [documents, chunks] = await Promise.all([
+      this.selectActiveFields(
+        "documents",
+        userId,
+        "id,type,title,url,concepts,one_line_summary,created_at,updated_at,version,project_id",
+        signal
+      ),
+      this.selectRetrievalChunks(userId, query, signal)
+    ]);
+
+    const empty = createEmptyDatabase();
+    return {
+      ...empty,
+      sources: documents.map(toRetrievalSource),
+      chunks: chunks.map(toChunk),
+      updatedAt: latestUpdatedAt([documents, chunks])
+    };
   }
 
   async persistState(userId: string, db: MindWeaveDB, options: PersistOptions = {}) {
@@ -273,6 +298,58 @@ export class CloudRepository {
     return data ?? [];
   }
 
+  private async selectActiveFields(table: string, userId: string, fields: string, signal?: AbortSignal) {
+    const { data, error } = await this.supabase
+      .from(table)
+      .select(fields)
+      .eq("user_id", userId)
+      .is("deleted_at", null)
+      .order("updated_at", { ascending: true })
+      .abortSignal(signal ?? new AbortController().signal);
+    if (error) throw new Error(error.message);
+    return data ?? [];
+  }
+
+  private async selectRetrievalChunks(userId: string, query?: string, signal?: AbortSignal) {
+    const terms = buildRetrievalTerms(query);
+    if (terms.length) {
+      const rowsById = new Map<string, any>();
+      const results = await Promise.all(
+        terms.slice(0, RETRIEVAL_TERM_LIMIT).map((term) =>
+          this.supabase
+            .from("document_chunks")
+            .select(RETRIEVAL_CHUNK_FIELDS)
+            .eq("user_id", userId)
+            .is("deleted_at", null)
+            .ilike("text", `%${escapeLikePattern(term)}%`)
+            .order("updated_at", { ascending: false })
+            .limit(RETRIEVAL_PER_TERM_LIMIT)
+            .abortSignal(signal ?? new AbortController().signal)
+        )
+      );
+      for (const { data, error } of results) {
+        if (error) throw new Error(error.message);
+        for (const row of data ?? []) {
+          rowsById.set(row.id, row);
+          if (rowsById.size >= RETRIEVAL_MATCH_LIMIT) break;
+        }
+        if (rowsById.size >= RETRIEVAL_MATCH_LIMIT) break;
+      }
+      if (rowsById.size) return Array.from(rowsById.values());
+    }
+
+    const { data, error } = await this.supabase
+      .from("document_chunks")
+      .select(RETRIEVAL_CHUNK_FIELDS)
+      .eq("user_id", userId)
+      .is("deleted_at", null)
+      .order("updated_at", { ascending: false })
+      .limit(RETRIEVAL_FALLBACK_LIMIT)
+      .abortSignal(signal ?? new AbortController().signal);
+    if (error) throw new Error(error.message);
+    return data ?? [];
+  }
+
   private async selectEvents(userId: string) {
     const { data, error } = await this.supabase
       .from("sync_events")
@@ -371,6 +448,61 @@ function toSource(row: any, summaryRow?: any): Source {
     knowledgeCardIds: row.knowledge_card_ids ?? stored.knowledgeCardIds ?? [],
     chunkIds: row.chunk_ids ?? stored.chunkIds ?? []
   };
+}
+
+function toRetrievalSource(row: any): Source {
+  return {
+    id: row.id,
+    type: row.type,
+    title: row.title,
+    url: row.url ?? undefined,
+    filePath: undefined,
+    storagePath: undefined,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    version: row.version,
+    projectId: row.project_id ?? "project_ai_research",
+    tags: [],
+    keywords: [],
+    concepts: row.concepts ?? [],
+    oneLineSummary: row.one_line_summary ?? "",
+    summary: { background: "", keyPoints: [], evidence: [], takeaways: [] },
+    content: "",
+    knowledgeCardIds: [],
+    chunkIds: []
+  };
+}
+
+function buildRetrievalTerms(query?: string) {
+  if (!query) return [];
+  const tokens = tokenize(query)
+    .filter((token) => token.length >= 2)
+    .filter((token) => !/^(什么|不同|区别|看法|观点|对于|关于|如何|怎么|哪里|哪些|为何|为什么)$/i.test(token));
+  const cjkRuns = query.match(/[\u3400-\u9fff]{2,}/g) ?? [];
+  const cjkTerms = cjkRuns.flatMap((run) => {
+    const normalized = run.replace(/(对于|关于|什么|有什么|哪些|哪里|如何|怎么|为什么|不同|区别|看法|观点|的|和|与|及|或|点)/g, " ");
+    return normalized
+      .split(/\s+/)
+      .filter((item) => item.length >= 2)
+      .flatMap((item) => {
+        if (item.length <= 4) return [item];
+        const windows: string[] = [];
+        for (let size = 4; size >= 2; size -= 1) {
+          for (let index = 0; index <= item.length - size; index += 1) {
+            windows.push(item.slice(index, index + size));
+          }
+        }
+        return windows;
+      });
+  });
+
+  return Array.from(new Set([...cjkTerms, ...tokens]))
+    .sort((left, right) => right.length - left.length)
+    .slice(0, 12);
+}
+
+function escapeLikePattern(value: string) {
+  return value.replace(/[\\%_]/g, (match) => `\\${match}`);
 }
 
 function toChunk(row: any): Chunk {

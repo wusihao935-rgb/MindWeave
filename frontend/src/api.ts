@@ -1,28 +1,48 @@
 import type { AnswerResponse, DashboardState, PublicApiProviderSetting, SearchResult } from "./types";
 
 const API_BASE = ((import.meta.env.VITE_API_BASE_URL as string | undefined) || "").replace(/\/+$/, "");
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 let tokenProvider: (() => Promise<string | null>) | null = null;
 
 export function configureApiAuth(provider: () => Promise<string | null>) {
   tokenProvider = provider;
 }
 
-async function request<T>(url: string, options: RequestInit = {}): Promise<T> {
+type ApiRequestInit = RequestInit & {
+  timeoutMs?: number;
+};
+
+async function request<T>(url: string, options: ApiRequestInit = {}): Promise<T> {
   if (import.meta.env.PROD && !API_BASE) {
     throw new Error("生产环境缺少 VITE_API_BASE_URL，请配置公网后端地址。");
   }
+  const { timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS, signal, ...requestOptions } = options;
   const token = tokenProvider ? await tokenProvider() : null;
-  const headers = new Headers(options.headers);
+  const headers = new Headers(requestOptions.headers);
   if (token) headers.set("Authorization", `Bearer ${token}`);
-  const response = await fetch(`${API_BASE}${url}`, { ...options, headers });
-  const payload = await readResponsePayload(response);
-  if (!response.ok) {
-    throw new Error(payload.error || payload.message || `请求失败（${response.status}）`);
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  const abortFromCaller = () => controller.abort();
+  signal?.addEventListener("abort", abortFromCaller, { once: true });
+  try {
+    const response = await fetch(`${API_BASE}${url}`, { ...requestOptions, headers, signal: controller.signal });
+    const payload = await readResponsePayload(response);
+    if (!response.ok) {
+      throw new Error(payload.error || payload.message || `请求失败（${response.status}）`);
+    }
+    return payload as T;
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error(`请求超时，请检查网络或稍后重试。（${Math.round(timeoutMs / 1000)} 秒）`);
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timer);
+    signal?.removeEventListener("abort", abortFromCaller);
   }
-  return payload as T;
 }
 
-async function readResponsePayload(response: Response): Promise<Record<string, string>> {
+async function readResponsePayload(response: Response): Promise<Record<string, any>> {
   const contentType = response.headers.get("content-type") || "";
   if (contentType.includes("application/json")) {
     return response.json().catch(() => ({}));
@@ -42,7 +62,8 @@ export function syncNow() {
 export function uploadSource(formData: FormData) {
   return request("/api/sources", {
     method: "POST",
-    body: formData
+    body: formData,
+    timeoutMs: 120_000
   });
 }
 
@@ -60,7 +81,8 @@ export function askKnowledge(question: string) {
   return request<AnswerResponse>("/api/ask", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ question })
+    body: JSON.stringify({ question }),
+    timeoutMs: 20_000
   });
 }
 
@@ -154,6 +176,7 @@ export function testProviderSetting(payload: Record<string, unknown>) {
   return request<{ ok: boolean; message?: string; error?: string }>("/api/settings/ai-providers/test", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload)
+    body: JSON.stringify(payload),
+    timeoutMs: 35_000
   });
 }

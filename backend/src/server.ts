@@ -21,10 +21,15 @@ const upload = multer({
     fileSize: 25 * 1024 * 1024
   }
 });
+const runtimeBuild = "qa-timeout-20260526-2";
 const localStore = new MindWeaveStore();
 const cloud = isSupabaseConfigured() ? new CloudRepository(getSupabaseAdmin()) : null;
 const port = Number(process.env.PORT ?? 4141);
 const corsOrigin = parseCorsOrigin(process.env.CORS_ORIGIN);
+const retrievalStateTimeoutMs = numberFromEnv("RETRIEVAL_STATE_TIMEOUT_MS", 12_000);
+const providerSettingTimeoutMs = numberFromEnv("PROVIDER_SETTING_TIMEOUT_MS", 8_000);
+const askProviderTimeoutMs = numberFromEnv("ASK_PROVIDER_TIMEOUT_MS", 6_000);
+const askResponseDeadlineMs = numberFromEnv("ASK_RESPONSE_DEADLINE_MS", 110_000);
 
 app.use(
   cors({
@@ -34,8 +39,24 @@ app.use(
 );
 app.use(express.json({ limit: "5mb" }));
 
+app.use((_req, res, next) => {
+  res.setHeader("X-MindWeave-Build", runtimeBuild);
+  next();
+});
+
 app.get("/api/health", (_req, res) => {
-  res.json({ ok: true, name: "MindWeave API", cloud: Boolean(cloud) });
+  res.json({
+    ok: true,
+    name: "MindWeave API",
+    cloud: Boolean(cloud),
+    build: runtimeBuild,
+    timeouts: {
+      retrievalStateTimeoutMs,
+      providerSettingTimeoutMs,
+      askProviderTimeoutMs,
+      askResponseDeadlineMs
+    }
+  });
 });
 
 app.use("/api", requireUser);
@@ -217,47 +238,132 @@ app.delete("/api/rules/stopwords/:word", (req, res) =>
 );
 
 app.get("/api/search", async (req, res) => {
+  const startedAt = Date.now();
+  const retrievalSignal = createTimeoutSignal(retrievalStateTimeoutMs);
   try {
     const query = String(req.query.q ?? "").trim();
     if (!query) return res.json({ results: [] });
-    const { db } = await getRequestState(req as unknown as AuthenticatedRequest);
-    res.json({ results: searchChunks(db, query, 10) });
+    const authReq = req as unknown as AuthenticatedRequest;
+    const db = await withTimeout(
+      getRetrievalState(authReq, query, retrievalSignal.signal),
+      retrievalStateTimeoutMs,
+      "资料库检索加载超时，请稍后重试。"
+    );
+    const results = searchChunks(db, query, 10);
+    console.info("Knowledge search completed", {
+      userId: logUserId(authReq.auth.userId),
+      queryLength: query.length,
+      chunks: db.chunks.length,
+      results: results.length,
+      durationMs: Date.now() - startedAt
+    });
+    res.json({ results });
   } catch (error) {
+    console.error("Knowledge search failed:", errorMessage(error, "搜索失败。"));
     res.status(500).json({ error: errorMessage(error, "搜索失败。") });
+  } finally {
+    retrievalSignal.cancel();
   }
 });
 
 app.post("/api/ask", async (req, res) => {
+  const startedAt = Date.now();
+  const responseDeadline = createResponseDeadline(res, askResponseDeadlineMs);
+  const retrievalSignal = createTimeoutSignal(retrievalStateTimeoutMs);
   try {
     const authReq = req as unknown as AuthenticatedRequest;
     const question = String(req.body.question ?? "").trim();
     if (!question) return res.status(400).json({ error: "请输入问题。" });
-    const { db } = await getRequestState(authReq);
+    const [db, activeSetting] = await Promise.all([
+      withTimeout(getRetrievalState(authReq, question, retrievalSignal.signal), retrievalStateTimeoutMs, "资料库问答加载超时，请稍后重试。"),
+      cloud
+        ? withTimeout(cloud.getActiveProviderSetting(authReq.auth.userId), providerSettingTimeoutMs, "模型配置读取超时，已回退到本地规则。").catch(
+            (error) => {
+              console.warn("AI provider setting unavailable:", errorMessage(error, "模型配置读取失败。"));
+              return null;
+            }
+          )
+        : Promise.resolve(null)
+    ]);
     const fallback = answerQuestion(db, question);
-    if (!fallback.citations.length || !cloud) return res.json({ ...fallback, provider: "local-rule-fallback", fallback: true });
+    if (!fallback.citations.length || !cloud) {
+      console.info("Knowledge ask completed with local fallback", {
+        userId: logUserId(authReq.auth.userId),
+        questionLength: question.length,
+        chunks: db.chunks.length,
+        citations: fallback.citations.length,
+        durationMs: Date.now() - startedAt
+      });
+      return sendJson(res, { ...fallback, provider: "local-rule-fallback", fallback: true, timings: askTimings(startedAt, db) });
+    }
 
-    const provider = createAIProvider(await cloud.getActiveProviderSetting(authReq.auth.userId));
+    let provider;
+    try {
+      provider = createAIProvider(activeSetting);
+    } catch (error) {
+      console.warn("AI provider configuration invalid, using fallback:", errorMessage(error, "模型配置不可用。"));
+      return sendJson(res, {
+        ...fallback,
+        answer: `${fallback.answer}\n\n外部模型配置不可用，已回退到本地规则。错误：${truncate(errorMessage(error, "模型配置不可用。"), 120)}`,
+        provider: "local-rule-fallback",
+        fallback: true,
+        timings: askTimings(startedAt, db)
+      });
+    }
     if (provider instanceof LocalRuleProvider) {
-      return res.json({ ...fallback, provider: provider.name, fallback: true });
+      console.info("Knowledge ask completed with configured local fallback", {
+        userId: logUserId(authReq.auth.userId),
+        questionLength: question.length,
+        chunks: db.chunks.length,
+        citations: fallback.citations.length,
+        durationMs: Date.now() - startedAt
+      });
+      return sendJson(res, { ...fallback, provider: provider.name, fallback: true, timings: askTimings(startedAt, db) });
     }
 
     try {
       const context = fallback.citations.map((citation, index) => `${index + 1}.《${citation.sourceTitle}》${citation.snippet}`).join("\n");
-      const answer = await provider.chat([
-        { role: "system", content: "你是 MindWeave 的资料库问答引擎。只能基于给定引用回答，不要编造来源。" },
-        { role: "user", content: `问题：${question}\n\n引用：\n${context}` }
-      ]);
-      res.json({ ...fallback, answer: answer || fallback.answer, provider: provider.name, fallback: false });
+      const answer = await withTimeout(
+        provider.chat([
+          { role: "system", content: "你是 MindWeave 的资料库问答引擎。只能基于给定引用回答，不要编造来源。" },
+          { role: "user", content: `问题：${question}\n\n引用：\n${context}` }
+        ]),
+        askProviderTimeoutMs,
+        `外部模型响应超过 ${Math.round(askProviderTimeoutMs / 1000)} 秒。`
+      );
+      console.info("Knowledge ask completed with remote provider", {
+        userId: logUserId(authReq.auth.userId),
+        questionLength: question.length,
+        chunks: db.chunks.length,
+        citations: fallback.citations.length,
+        provider: provider.name,
+        durationMs: Date.now() - startedAt
+      });
+      sendJson(res, { ...fallback, answer: answer || fallback.answer, provider: provider.name, fallback: false, timings: askTimings(startedAt, db) });
     } catch (error) {
-      res.json({
+      console.warn("Knowledge ask provider failed, using fallback:", errorMessage(error, "模型调用失败。"));
+      sendJson(res, {
         ...fallback,
         answer: `${fallback.answer}\n\n外部模型暂时不可用，已回退到本地规则。错误：${truncate(errorMessage(error, "模型调用失败。"), 120)}`,
         provider: provider.name,
-        fallback: true
+        fallback: true,
+        timings: askTimings(startedAt, db)
       });
     }
   } catch (error) {
-    res.status(500).json({ error: errorMessage(error, "问答失败。") });
+    console.error("Knowledge ask failed:", errorMessage(error, "问答失败。"));
+    sendJson(res.status(500), {
+      answer: errorMessage(error, "问答失败。"),
+      citations: [],
+      relatedConcepts: [],
+      provider: "error",
+      fallback: true,
+      error: errorMessage(error, "问答失败。"),
+      timings: { durationMs: Date.now() - startedAt, build: runtimeBuild }
+    });
+  } finally {
+    retrievalSignal.cancel();
+    responseDeadline.cancel();
   }
 });
 
@@ -355,6 +461,11 @@ async function getRequestState(req: AuthenticatedRequest) {
   return { store, db: store.getState() };
 }
 
+async function getRetrievalState(req: AuthenticatedRequest, query?: string, signal?: AbortSignal) {
+  if (!cloud || req.auth.mode === "local") return localStore.getState();
+  return cloud.loadRetrievalState(req.auth.userId, query, signal);
+}
+
 async function persistRequestState(req: AuthenticatedRequest, store: MindWeaveStore, options?: Parameters<CloudRepository["persistState"]>[2]) {
   if (!cloud || req.auth.mode === "local") return;
   // TODO: 冲突策略当前为 last-write-wins，后续引入字段级合并与冲突提示。
@@ -424,6 +535,66 @@ function defaultBaseUrl(providerName: string) {
 
 function errorMessage(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback;
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<T>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
+function createTimeoutSignal(timeoutMs: number) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  return {
+    signal: controller.signal,
+    cancel: () => clearTimeout(timer)
+  };
+}
+
+function createResponseDeadline(res: express.Response, timeoutMs: number) {
+  const timer = setTimeout(() => {
+    if (res.headersSent) return;
+    res.status(504).json({
+      answer: "资料库问答超过两分钟仍未完成，已中止本次请求。请稍后重试，或先用更短的问题搜索相关资料。",
+      citations: [],
+      relatedConcepts: [],
+      provider: "deadline",
+      fallback: true,
+      error: "资料库问答响应超时。",
+      timings: { durationMs: timeoutMs, build: runtimeBuild }
+    });
+  }, timeoutMs);
+  return {
+    cancel: () => clearTimeout(timer)
+  };
+}
+
+function sendJson(res: express.Response, payload: unknown) {
+  if (res.headersSent) return;
+  res.json(payload);
+}
+
+function askTimings(startedAt: number, db: { chunks?: unknown[]; sources?: unknown[] }) {
+  return {
+    durationMs: Date.now() - startedAt,
+    retrievedChunks: db.chunks?.length ?? 0,
+    retrievedSources: db.sources?.length ?? 0,
+    build: runtimeBuild
+  };
+}
+
+function numberFromEnv(name: string, fallback: number) {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function logUserId(userId: string) {
+  return userId.length > 8 ? `${userId.slice(0, 8)}...` : userId;
 }
 
 function parseCorsOrigin(value?: string) {

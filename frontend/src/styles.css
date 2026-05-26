@@ -963,6 +963,11 @@ button {
   font-weight: 700;
 }
 
+.answer-meta {
+  color: #7b8499;
+  font-size: 12px;
+}
+
 .citation-list {
   display: grid;
   gap: 7px;
@@ -1488,7 +1493,8 @@ button {
 }
 
 .login-form button:disabled,
-.settings-actions button:disabled {
+.settings-actions button:disabled,
+.ask-panel button:disabled {
   cursor: not-allowed;
   opacity: 0.58;
 }

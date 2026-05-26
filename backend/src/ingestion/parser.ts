@@ -2,6 +2,9 @@ import * as cheerio from "cheerio";
 import type { ParsedSource, SourceType } from "../types.js";
 import { cleanText, extractTitle } from "../utils/text.js";
 
+const pdfParseTimeoutMs = numberFromEnv("PDF_PARSE_TIMEOUT_MS", 45_000);
+const sourceUrlFetchTimeoutMs = numberFromEnv("SOURCE_URL_FETCH_TIMEOUT_MS", 20_000);
+
 interface ParseInput {
   file?: Express.Multer.File;
   url?: string;
@@ -31,7 +34,7 @@ async function parseFile(file: Express.Multer.File, explicitTitle?: string): Pro
   if (type === "pdf") {
     try {
       const pdfParse = (await import("pdf-parse")).default;
-      const result = await pdfParse(file.buffer);
+      const result = await withTimeout(pdfParse(file.buffer), pdfParseTimeoutMs, "PDF 文本提取超时，请尝试拆分文件或转换为文本后再导入。");
       content = result.text;
     } catch (error) {
       const detail = error instanceof Error ? error.message : "未知错误";
@@ -51,11 +54,16 @@ async function parseFile(file: Express.Multer.File, explicitTitle?: string): Pro
 }
 
 async function parseUrl(url: string): Promise<ParsedSource> {
-  const response = await fetch(url, {
-    headers: {
-      "user-agent": "MindWeavePrototype/0.1"
-    }
-  });
+  const response = await fetchWithTimeout(
+    url,
+    {
+      headers: {
+        "user-agent": "MindWeavePrototype/0.1"
+      }
+    },
+    sourceUrlFetchTimeoutMs,
+    "网页抓取超时，请稍后重试或粘贴正文。"
+  );
   if (!response.ok) {
     throw new Error(`网页抓取失败：${response.status} ${response.statusText}`);
   }
@@ -90,4 +98,34 @@ function detectSourceType(file: Express.Multer.File): SourceType {
   if (extension === "md" || extension === "markdown" || mimeType.includes("markdown")) return "markdown";
   if (extension === "txt" || mimeType.startsWith("text/")) return "txt";
   return "unknown";
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<T>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
+async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number, timeoutMessage: string) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error(timeoutMessage);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function numberFromEnv(name: string, fallback: number) {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
 }

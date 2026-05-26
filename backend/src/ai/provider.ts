@@ -2,6 +2,8 @@ import type { ApiProviderSetting, RelationEdge, StructuredSummary } from "../typ
 import { splitSentences, truncate } from "../utils/text.js";
 import { decryptProviderApiKey } from "../supabase/cloudRepository.js";
 
+const aiRequestTimeoutMs = numberFromEnv("AI_REQUEST_TIMEOUT_MS", 25_000);
+
 export interface ChatMessage {
   role: "system" | "user" | "assistant";
   content: string;
@@ -125,11 +127,11 @@ class RemoteAIProvider implements AIProvider {
     const form = new FormData();
     form.set("model", this.setting.asrModel);
     form.set("file", new Blob([new Uint8Array(audio)]), filename);
-    const response = await fetch(`${trimSlash(this.setting.baseUrl)}/audio/transcriptions`, {
+    const response = await fetchWithTimeout(`${trimSlash(this.setting.baseUrl)}/audio/transcriptions`, {
       method: "POST",
       headers: { Authorization: `Bearer ${this.apiKey}` },
       body: form
-    });
+    }, aiRequestTimeoutMs, "ASR 调用超时。");
     if (!response.ok) throw new Error(`ASR 调用失败：${response.status}`);
     const payload = await response.json();
     return payload.text ?? "";
@@ -145,14 +147,19 @@ class RemoteAIProvider implements AIProvider {
   }
 
   private async openAIRequest(pathname: string, body: unknown) {
-    const response = await fetch(`${trimSlash(this.setting.baseUrl)}${pathname}`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${this.apiKey}`,
-        "Content-Type": "application/json"
+    const response = await fetchWithTimeout(
+      `${trimSlash(this.setting.baseUrl)}${pathname}`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${this.apiKey}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(body)
       },
-      body: JSON.stringify(body)
-    });
+      aiRequestTimeoutMs,
+      "模型服务调用超时。"
+    );
     if (!response.ok) {
       const message = await response.text().catch(() => "");
       throw new Error(`模型服务调用失败：${response.status} ${truncate(message, 180)}`);
@@ -162,18 +169,23 @@ class RemoteAIProvider implements AIProvider {
 
   private async geminiChat(messages: ChatMessage[]) {
     const base = trimSlash(this.setting.baseUrl || "https://generativelanguage.googleapis.com/v1beta");
-    const response = await fetch(`${base}/models/${encodeURIComponent(this.setting.chatModel)}:generateContent?key=${encodeURIComponent(this.apiKey)}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: messages
-          .filter((message) => message.role !== "system")
-          .map((message) => ({ role: message.role === "assistant" ? "model" : "user", parts: [{ text: message.content }] })),
-        systemInstruction: {
-          parts: [{ text: messages.find((message) => message.role === "system")?.content ?? "You are a helpful assistant." }]
-        }
-      })
-    });
+    const response = await fetchWithTimeout(
+      `${base}/models/${encodeURIComponent(this.setting.chatModel)}:generateContent?key=${encodeURIComponent(this.apiKey)}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: messages
+            .filter((message) => message.role !== "system")
+            .map((message) => ({ role: message.role === "assistant" ? "model" : "user", parts: [{ text: message.content }] })),
+          systemInstruction: {
+            parts: [{ text: messages.find((message) => message.role === "system")?.content ?? "You are a helpful assistant." }]
+          }
+        })
+      },
+      aiRequestTimeoutMs,
+      "Gemini 调用超时。"
+    );
     if (!response.ok) throw new Error(`Gemini 调用失败：${response.status}`);
     const payload = await response.json();
     return payload.candidates?.[0]?.content?.parts?.map((part: any) => part.text).join("") ?? "";
@@ -212,4 +224,24 @@ function extractJson(text: string) {
 
 function trimSlash(value: string) {
   return value.replace(/\/+$/, "");
+}
+
+async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number, timeoutMessage: string) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error(`${timeoutMessage} 请检查模型服务地址、网络或稍后重试。`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function numberFromEnv(name: string, fallback: number) {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
 }
