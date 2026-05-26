@@ -238,13 +238,14 @@ export class CloudRepository {
   }
 
   private async replaceRows(table: string, userId: string, activeIds: string[], rows: Array<Record<string, unknown>>) {
-    if (rows.length) {
-      const { error } = await this.supabase.from(table).upsert(rows, { onConflict: "user_id,id" });
-      if (error) throw new Error(error.message);
+    const uniqueRows = uniqueRowsById(rows);
+    if (uniqueRows.length) {
+      const { error } = await this.supabase.from(table).upsert(uniqueRows, { onConflict: "user_id,id" });
+      if (error) throw new Error(`${table} 写入失败：${error.message}`);
     }
 
     const { data, error } = await this.supabase.from(table).select("id").eq("user_id", userId).is("deleted_at", null);
-    if (error) throw new Error(error.message);
+    if (error) throw new Error(`${table} 查询失败：${error.message}`);
 
     const active = new Set(activeIds);
     const missing = (data ?? []).map((row) => row.id as string).filter((id) => !active.has(id));
@@ -254,7 +255,7 @@ export class CloudRepository {
         .update({ deleted_at: new Date().toISOString(), updated_at: new Date().toISOString(), version: Date.now() })
         .eq("user_id", userId)
         .in("id", missing);
-      if (updateError) throw new Error(updateError.message);
+      if (updateError) throw new Error(`${table} 软删除失败：${updateError.message}`);
     }
   }
 
@@ -293,6 +294,16 @@ export class CloudRepository {
     });
     if (error) throw new Error(error.message);
   }
+}
+
+function uniqueRowsById(rows: Array<Record<string, unknown>>) {
+  const map = new Map<string, Record<string, unknown>>();
+  for (const row of rows) {
+    const id = typeof row.id === "string" ? row.id : String(row.id ?? "");
+    if (!id) continue;
+    map.set(id, row);
+  }
+  return Array.from(map.values());
 }
 
 function toSource(row: any, summaryRow?: any): Source {
